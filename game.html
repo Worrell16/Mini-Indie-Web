@@ -1,0 +1,877 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Retro Platformer</title>
+    <style>
+        html, body { margin: 0; padding: 0; overflow: hidden; width: 100%; height: 100%; background: #000; }
+        body { display: block; }
+        canvas { display: block; background: #87CEEB; margin: 0; padding: 0; }
+    </style>
+</head>
+<body>
+    <canvas id="game"></canvas>
+    <script>
+    (function(){
+        const canvas = document.getElementById('game');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        const ctx = canvas.getContext('2d');
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        });
+
+        const NORMAL_SPEED = 7;
+        const SPRINT_SPEED = 10.5;
+
+        const assets=[
+            'IdleW.png','RunW1.png','RunW2.png','RunW3.png','RunW4.png','JumpW.png',
+            'GrassBlock.png','DirtBlock.png','Pipe.png','PlantChomper.png',
+            'SlimeBlob.png','noonbackground.png','Coin.png','Star.png','Checkpoint.png','HeartLife.png','ExclaMark.png','RUN.png'
+        ];
+        const images={};
+        let loaded=0;
+        assets.forEach(a=>{const i=new Image();i.src=a;i.onload=()=>loaded++;images[a]=i;});
+
+        const GROUND_Y = window.innerHeight - 64;
+        const GRASS_TOP_OFFSET = -2;
+        const GRAVITY = 0.8;
+        const JUMP_FORCE = -16;
+        const GOAL_DISTANCE = 1000;
+
+        const player={x:50,y:GROUND_Y - 150,width:77,height:77,vx:0,dy:0,onGround:false,isJumping:false,jumpTimer:0,maxHearts:5,currentHearts:5,invincibleTimer:0,checkpointX:50,checkpointY:GROUND_Y,coins:0,active:true,animTimer:0,animFrame:0,speed:NORMAL_SPEED,sprintSpeed:SPRINT_SPEED,speedTimer:0,hasStar:false,facing:'right'};
+        let respawnX=50;
+        let cameraX=0, cameraY=0;
+
+        // Apocalypse system variables
+        let hasTriggeredApocalypse = false;
+        let renderAlpha = 0;
+        let isShaking = false;
+        let showRunUI = false;
+
+        // NUCLEAR RESET: Clean block system with separate collision and visual coordinates
+        const blocks=[];
+        const floatingPlatforms=[];
+        const pipeList=[];
+        const plantList=[];
+        const coinList=[];
+        const starList=[];
+        const checkpointList=[];
+        const slimes=[{x:400,y:GROUND_Y-48,width:48,height:48,vx:0,dy:0,isAlarmed:false,isChasing:false,alarmTimer:0,onGround:true},{x:900,y:GROUND_Y-48,width:48,height:48,vx:0,dy:0,isAlarmed:false,isChasing:false,alarmTimer:0,onGround:true},{x:1400,y:GROUND_Y-48,width:48,height:48,vx:0,dy:0,isAlarmed:false,isChasing:false,alarmTimer:0,onGround:true}];
+        let generatedUntil=0;
+        let lastItemX = -200;
+        
+        // Initialize ground blocks from 0 to 500 with collisionY and visualY separated
+        for(let x = 0; x <= 500; x += 64){
+            blocks.push({x: x, collisionY: GROUND_Y, visualY: GROUND_Y + 20, width: 64, height: 64});
+        }
+
+        const keysDown = {};
+        window.addEventListener('keydown', e => { keysDown[e.code] = true; });
+        window.addEventListener('keyup', e => { delete keysDown[e.code]; });
+        
+        // Dev cheat: Ctrl+Q teleports to 500m mark
+        window.addEventListener('keydown', e => {
+            if (e.ctrlKey && e.key === 'q') {
+                player.x = 100000; // 500m * 200 pixels per meter
+                player.y = GROUND_Y - player.height - 50;
+                respawnX = player.x;
+                player.checkpointY = player.y;
+                player.vx = 0;
+                player.dy = 0;
+                player.onGround = true;
+                fullReset();
+            }
+        });
+
+        function fullReset(){
+            // Stop Apocalypse.mp3
+            // TODO: audio.pause(); audio.currentTime = 0;
+            hasTriggeredApocalypse = false;
+            renderAlpha = 0;
+            isShaking = false;
+            showRunUI = false;
+        }
+
+        function spawnPipe(x, gameDistance = 0){
+            // Post-500m difficulty spike: shorter pipes (60-120px) for sprint hurdles
+            const minHeight = gameDistance >= 500 ? 60 : 120;
+            const heightRange = gameDistance >= 500 ? 60 : 180; // 60-120px post-500m, 120-300px before
+            const pipeHeight = minHeight + Math.random() * heightRange;
+            const pipeY = GROUND_Y - pipeHeight - 18; // Ground the pipe
+            pipeList.push({x:x, y:pipeY, width:100, height:pipeHeight});
+            // Plant sits on top of pipe opening
+            const plantY = pipeY - 96 + 5; // plant.height is 96
+            plantList.push({x:x + 18, y:plantY, offsetY:0, dir:1, isUp:false, waitTimer:0});
+        }
+
+        function spawnChunk(baseX){
+            // 3m safe zone: gameDistance = player.x / 200, so first 3m = x < 600
+            const gameDistance = baseX / 200;
+            if(gameDistance < 3){
+                return; // No spawns in first 3m (falling spawn safety zone)
+            }
+
+            let type = Math.random();
+            if(baseX < 500){
+                type = 0.25; // guaranteed safe non-monster start
+            }
+            
+            // Post-500m: increase pipe spawn rate by 50%
+            const pipeThreshold = gameDistance >= 500 ? 0.675 : 0.75; // Wider pipe range post-500m
+            
+            // Stop low platforms after 500m: gameDistance >= 500 means x >= 100000
+            const shouldGenerateLowPlatforms = (gameDistance < 500);
+
+            if(type < 0.15){
+                // Gap module: no base ground platform in this zone; place floating safe recovery island
+                const islandX = baseX + 64;
+                const randomHeight = GROUND_Y - 180 - Math.random() * 220; // Between 180px and 400px above ground
+                const islandPlatform = {x:islandX, y:randomHeight, width:128, height:32};
+                floatingPlatforms.push(islandPlatform);
+                const coinX = islandX + 64;
+                const coinY = 100 + Math.random() * 100;
+                if(Math.abs(coinX - lastItemX) >= 150){
+                    coinList.push({x:coinX, y:coinY, used:false, yOffset:0});
+                    lastItemX = coinX;
+                }
+            } else if(type < 0.45){
+                const randomHeight = GROUND_Y - 180 - Math.random() * 220; // Between 180px and 400px above ground
+                const grassPlatform = {x:baseX, y:randomHeight, width:128, height:32};
+                floatingPlatforms.push(grassPlatform);
+                const coinX = baseX + 40;
+                const coinY = 100 + Math.random() * 100;
+                if(Math.abs(coinX - lastItemX) >= 150){
+                    coinList.push({x:coinX, y:coinY, used:false, yOffset:0});
+                    lastItemX = coinX;
+                }
+            } else if(type < pipeThreshold){
+                spawnPipe(baseX, gameDistance);
+                const coinX = baseX + 40;
+                const coinY = 100 + Math.random() * 100;
+                if(Math.abs(coinX - lastItemX) >= 150){
+                    coinList.push({x:coinX, y:coinY, used:false, yOffset:0});
+                    lastItemX = coinX;
+                }
+                if(Math.random() < 0.2){
+                    const starX = baseX + 60;
+                    const starY = 100 + Math.random() * 100;
+                    if(Math.abs(starX - lastItemX) >= 150){
+                        starList.push({x:starX, y:starY, used:false});
+                        lastItemX = starX;
+                    }
+                }
+            } else {
+                const randomHeight = GROUND_Y - 180 - Math.random() * 220; // Between 180px and 400px above ground
+                const grassPlatform2 = {x:baseX, y:randomHeight, width:128, height:32};
+                floatingPlatforms.push(grassPlatform2);
+                const coinX = baseX + 30;
+                const coinY = 100 + Math.random() * 100;
+                if(Math.abs(coinX - lastItemX) >= 150){
+                    coinList.push({x:coinX, y:coinY, used:false, yOffset:0});
+                    lastItemX = coinX;
+                }
+                if(Math.random() < 0.15){
+                    const starX = baseX + 40;
+                    const starY = 100 + Math.random() * 100;
+                    if(Math.abs(starX - lastItemX) >= 150){
+                        starList.push({x:starX, y:starY, used:false});
+                        lastItemX = starX;
+                    }
+                }
+                const slimeX = baseX + 64;
+                const slimeY = grassPlatform2.y - 48;
+                slimes.push({x:slimeX, y:slimeY, width:48, height:48, vx:0, dy:0, isAlarmed:false, isChasing:false, alarmTimer:0, onGround:true});
+            }
+
+            // Add low-level stepping stones only when shouldGenerateLowPlatforms is true (training zone)
+            if(shouldGenerateLowPlatforms){
+                if(baseX === 400 || baseX === 0){
+                    floatingPlatforms.push({x: baseX + (baseX === 0 ? 300 : 0), y: GROUND_Y - 60, width: 80, height: 20}); // Low platform
+                }
+            }
+
+            // Spawn checkpoints at 100m, 200m, 300m, 400m, 500m ONLY (stop after 500m)
+            // Scale checkpoints 50% larger: 72x72 instead of 48x48
+            const checkpointDistances = [100, 200, 300, 400, 500];
+            for(const cpDist of checkpointDistances){
+                const cpX = cpDist * 200;
+                if(baseX === cpX){
+                    checkpointList.push({x: cpX, y: GROUND_Y - 72 - 67, width: 72, height: 72}); // Grounded 27px lower total
+                    // Dead-zone: remove pipes and plants near this checkpoint
+                    for(let i = pipeList.length - 1; i >= 0; i--){
+                        if(Math.abs(pipeList[i].x - cpX) < 100){
+                            const removedPipe = pipeList[i];
+                            pipeList.splice(i, 1);
+                            // Remove associated plant
+                            for(let j = plantList.length - 1; j >= 0; j--){
+                                if(Math.abs(plantList[j].x - removedPipe.x - 18) < 10){
+                                    plantList.splice(j, 1);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        function isColliding(entity, platform){
+            return entity.x + entity.width > platform.x &&
+                entity.x < platform.x + platform.width &&
+                entity.y + entity.height > platform.y &&
+                entity.y < platform.y + platform.height;
+        }
+
+        // Shrunk hitbox for damage only (12px padding on all sides)
+        function checkDamageCollision(player, enemy){
+            return (player.x + 12 < enemy.x + enemy.width &&
+                    player.x + player.width - 12 > enemy.x &&
+                    player.y + 12 < enemy.y + enemy.height &&
+                    player.y + player.height - 12 > enemy.y);
+        }
+
+        function update(){
+            while(generatedUntil < player.x + 1000){
+                spawnChunk(generatedUntil);
+                // Add ground blocks to the base floor
+                for(let x = generatedUntil; x < generatedUntil + 400; x += 64){
+                    blocks.push({x: x, collisionY: GROUND_Y, visualY: GROUND_Y + 20, width: 64, height: 64});
+                }
+                generatedUntil += 400;
+            }
+
+            const currentSpeed = (keysDown['ShiftLeft'] || keysDown['ShiftRight']) ? player.sprintSpeed : player.speed;
+            if(keysDown['ArrowLeft'] || keysDown['KeyA']) player.vx = -currentSpeed;
+            else if(keysDown['ArrowRight'] || keysDown['KeyD']) player.vx = currentSpeed;
+            else player.vx = 0; // Absolute reset when no keys pressed
+
+            // Track player facing direction (happens before movement)
+            if(player.vx !== 0){
+                player.facing = player.vx > 0 ? 'right' : 'left';
+            }
+
+            // NON-STICKY PIPE COLLISION: Prioritized top vs side
+            pipeList.forEach(pipe => {
+                // 1. TOP COLLISION (Standing/Walking) - Priority buffer
+                // Check first: if falling/standing and feet in top 15px, land on top
+                if (player.dy >= 0 && 
+                    player.x + player.width > pipe.x + 5 && 
+                    player.x < pipe.x + pipe.width - 5 &&
+                    player.y + player.height <= pipe.y + 15 && 
+                    player.y + player.height + player.dy >= pipe.y) {
+                        player.y = pipe.y - player.height;
+                        player.dy = 0;
+                        player.onGround = true;
+                        player.isJumping = false;
+                        player.currentImage = (Math.abs(player.vx) > 0.1) ? 'RunW1.png' : 'IdleW.png';
+                } 
+                
+                // 2. SIDE COLLISION (Blocking Sprint/Walk) - Only if not on top
+                // Triggers only if feet are deeper than 15px into pipe height
+                else if (player.x + player.vx + player.width > pipe.x && 
+                         player.x + player.vx < pipe.x + pipe.width &&
+                         player.y + player.height > pipe.y + 15) {
+                            // Hard stop horizontal momentum
+                            player.vx = 0; 
+                            // Snap to outside edge to prevent phasing
+                            if (player.x < pipe.x) {
+                                player.x = pipe.x - player.width;
+                            } else {
+                                player.x = pipe.x + pipe.width;
+                            }
+                }
+            });
+
+            // Apply horizontal movement after collision checks
+            player.x += player.vx;
+            if(player.x < 0) player.x = 0;
+
+            // 500m Apocalypse Trigger - One-time only
+            const currentMeters = Math.floor(player.x / 200);
+            if(currentMeters >= 500 && !hasTriggeredApocalypse){
+                hasTriggeredApocalypse = true;
+                renderAlpha = 1.0;
+                isShaking = true;
+                showRunUI = true;
+                // TODO: Play Apocalypse.mp3 once
+            }
+
+            // Fade sequence over 3-5 seconds (180-300 frames at 60fps)
+            if(hasTriggeredApocalypse && renderAlpha > 0){
+                renderAlpha -= 0.005; // Adjust for desired fade time
+                if(renderAlpha <= 0){
+                    renderAlpha = 0;
+                    isShaking = false;
+                    showRunUI = false;
+                }
+            }
+
+            // Hard Reset: Death or R key
+            const shouldReset = keysDown['KeyR'] || player.currentHearts <= 0;
+            if(shouldReset){
+                // Master reset: scrub environment
+                resetEnvironment();
+
+                // Safe spawn: if past 500m, spawn at 500m - 150px
+                const safeX = respawnX >= 100000 ? 99850 : (respawnX === 50 ? 0 : respawnX);
+                player.x = safeX;
+                player.y = player.checkpointY;
+                player.vx = 0;
+                player.dy = 0;
+                player.onGround = true;
+                player.currentHearts = 5; // Reset hearts
+            }
+
+            // JUMP INPUT: Set upward velocity with maximum nudge for bigger player
+            if((keysDown['ArrowUp'] || keysDown['KeyW'] || keysDown['Space']) && player.onGround){
+                player.dy = -19; // Stronger jump power for larger body
+                player.onGround = false;
+                player.isJumping = true;
+                player.y -= 22; // Maximum nudge to match visual lift and clear collision zone
+            }
+
+            // FORCE OFF-GROUND DURING UPWARD MOTION
+            if(player.dy < 0){
+                player.onGround = false; // Player cannot be on ground while moving up
+            }
+
+            // ⚡ CHECK COLLISIONS ONLY WHEN FALLING OR STATIONARY (dy >= 0)
+            let groundHit = false;
+
+            const isStandingOnSurface = () => {
+                const targetFeet = player.y + player.height;
+
+                for(const block of blocks){
+                    if(player.x + player.width > block.x && player.x < block.x + block.width){
+                        const blockFeet = block.collisionY - 2;
+                        if(Math.abs(targetFeet - blockFeet) <= 1){
+                            return true;
+                        }
+                    }
+                }
+
+                for(const fp of floatingPlatforms){
+                    if(player.x + player.width > fp.x && player.x < fp.x + fp.width){
+                        const fpFeet = fp.y - 2;
+                        if(Math.abs(targetFeet - fpFeet) <= 1){
+                            return true;
+                        }
+                    }
+                }
+
+                for(const pipe of pipeList){
+                    const hitboxWidth = pipe.width * 0.5;
+                    const hitboxX = pipe.x + (pipe.width - hitboxWidth) / 2;
+                    if(player.x + player.width > hitboxX && player.x < hitboxX + hitboxWidth){
+                        const pipeFeet = pipe.y - 2;
+                        if(Math.abs(targetFeet - pipeFeet) <= 1){
+                            return true;
+                        }
+                    }
+                }
+
+                return false;
+            };
+
+            if(player.onGround && player.dy === 0 && isStandingOnSurface()){
+                groundHit = true;
+            }
+
+            // ONLY check ground collisions when FALLING or STATIONARY (dy >= 0)
+            if(player.dy >= 0){
+                // Block collision (only when falling into floor) - TALLER collision zone
+                if(!groundHit){
+                    for(const block of blocks){
+                        const landingZone = 25; // Taller detection area for bigger player
+                        if(player.y + player.height <= block.collisionY + landingZone && 
+                           player.y + player.height >= block.collisionY - 5){
+                            if(player.x + player.width > block.x && player.x < block.x + block.width){
+                                player.surfaceY = block.collisionY;
+                                player.y = block.collisionY - player.height + 2; // Standard landing offset
+                                player.dy = 0;
+                                player.onGround = true;
+                                player.isJumping = false;
+                                player.currentImage = (Math.abs(player.vx) > 0.1) ? 'RunW1.png' : 'IdleW.png';
+                                groundHit = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Floating platform collision (only when falling into floor) - TALLER collision zone
+                if(!groundHit){
+                    for(const fp of floatingPlatforms){
+                        const landingZone = 25; // Taller detection area for bigger player
+                        if(player.y + player.height <= fp.y + landingZone && 
+                           player.y + player.height >= fp.y - 5){
+                            if(player.x + player.width > fp.x && player.x < fp.x + fp.width){
+                                player.surfaceY = fp.y;
+                                player.y = fp.y - player.height + 2; // Standard landing offset
+                                player.dy = 0;
+                                player.onGround = true;
+                                player.isJumping = false;
+                                player.currentImage = (Math.abs(player.vx) > 0.1) ? 'RunW1.png' : 'IdleW.png';
+                                groundHit = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Pipe top landing now handled in prioritized collision above
+
+                // Boundary collision
+                if(player.y > GROUND_Y){ 
+                    player.surfaceY = GROUND_Y; 
+                    player.y = GROUND_Y; 
+                    player.dy = 0; 
+                    player.onGround = true; 
+                    groundHit = true; 
+                }
+            }
+
+            // Pipe side collision (horizontal wall with narrow hitbox)
+            for(const pipe of pipeList){
+                const hitboxWidth = pipe.width * 0.5;
+                const hitboxX = pipe.x + (pipe.width - hitboxWidth) / 2;
+
+                // Left side collision
+                if(player.x + player.width > hitboxX && player.x + player.width <= hitboxX + 10 && player.y + player.height > pipe.y && player.y < pipe.y + pipe.height){
+                    player.x = hitboxX - player.width;
+                    player.vx = 0;
+                }
+                // Right side collision
+                if(player.x < hitboxX + hitboxWidth && player.x >= hitboxX + hitboxWidth - 10 && player.y + player.height > pipe.y && player.y < pipe.y + pipe.height){
+                    player.x = hitboxX + hitboxWidth;
+                    player.vx = 0;
+                }
+            }
+
+            // If no collision detected, player is now falling or off-edge
+            if(!groundHit){
+                player.onGround = false;
+            }
+
+            // Gravity application: ONLY when player is not on ground
+            if(!player.onGround){
+                // Meteor gravity: lighter rise, heavier fall
+                if(player.dy < 0){
+                    player.dy += GRAVITY * 0.8; // floaty rise
+                } else {
+                    player.dy += GRAVITY * 2.5; // heavy fast fall
+                }
+            }
+
+            // Terminal velocity cap
+            if(player.dy > 12){
+                player.dy = 12;
+            }
+
+            player.y += player.dy;
+
+            if(player.invincibleTimer > 0) player.invincibleTimer--;
+            if(player.speedTimer > 0){
+                player.speedTimer--;
+                if(player.speedTimer <= 0){
+                    player.speed = 7;
+                    player.hasStar = false;
+                }
+            }
+
+            // slimes behavior and physics loop
+            for(const slime of slimes){
+                // AI state management
+                const dx = player.x - slime.x;
+                const dist = Math.hypot(dx, player.y - slime.y);
+                
+                // Spot & Pause mechanic: freeze for 0.5s when player is detected
+                if(dist < 200 && !slime.isChasing){
+                    slime.isAlarmed = true;
+                    slime.alarmTimer = 30; // 0.5 second pause
+                    slime.isChasing = true; // Mark as "found player"
+                }
+
+                // Alarm state: freeze and display ExclaMark
+                if(slime.isAlarmed){
+                    slime.vx = 0; // Freeze movement during alarm
+                    slime.alarmTimer--;
+                    if(slime.alarmTimer <= 0){
+                        slime.isAlarmed = false; // Pause over, start the hunt
+                    }
+                }
+                // Chase state: pursue player
+                else if(slime.isChasing){
+                    slime.vx = player.x > slime.x ? 2 : -2; // Chase
+                }
+                // Idle state: patrol
+                else {
+                    if(slime.vx === 0) slime.vx = 1;
+                    // reverse on world edges (simple patrol)
+                    if(slime.x < 0 || slime.x > 4000) slime.vx *= -1;
+                }
+
+                // Horizontal movement
+                slime.x += slime.vx;
+
+                // STATE LOCK: Reset ground state at frame start
+                slime.onGround = false;
+
+                // Apply gravity ONLY if not on ground
+                if(!slime.onGround){
+                    slime.dy += 0.8;
+                } else {
+                    slime.dy = 0;
+                }
+                slime.y += slime.dy;
+
+                // Collision detection (identical to player)
+                let groundHit = false;
+                
+                // Block collision
+                for(const block of blocks){
+                    if(slime.dy >= 0 && slime.y + slime.height > block.collisionY && slime.y + slime.height - slime.dy <= block.collisionY + block.height){
+                        if(slime.x + slime.width > block.x && slime.x < block.x + block.width){
+                            slime.y = block.collisionY - slime.height + GRASS_TOP_OFFSET;
+                            slime.dy = 0;
+                            slime.onGround = true;
+                            groundHit = true;
+                            break;
+                        }
+                    }
+                }
+                
+                // Floating platform collision
+                if(!groundHit){
+                    for(const fp of floatingPlatforms){
+                        if(slime.dy >= 0 && slime.y + slime.height > fp.y && slime.y + slime.height - slime.dy <= fp.y + fp.height){
+                            if(slime.x + slime.width > fp.x && slime.x < fp.x + fp.width){
+                                slime.y = fp.y - slime.height + GRASS_TOP_OFFSET;
+                                slime.dy = 0;
+                                slime.onGround = true;
+                                groundHit = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // NUCLEAR RESET: Simple pipe collision - only land on top when falling with 10px side padding
+                if(!groundHit){
+                    for(const pipe of pipeList){
+                        if(slime.dy > 0 && 
+                            slime.y + slime.height < pipe.y + 15 && 
+                            slime.x + slime.width > pipe.x + 10 && 
+                            slime.x < pipe.x + pipe.width - 10){
+                            slime.y = pipe.y - slime.height + GRASS_TOP_OFFSET;
+                            slime.dy = 0;
+                            slime.onGround = true;
+                            groundHit = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Slime-Pipe side collision (horizontal wall - no ghosting)
+                for(const pipe of pipeList){
+                    const slimeBuffer = 15; // Expanded buffer for wider presence
+                    const pipeLeft = pipe.x + (pipe.width * 0.2);
+                    const pipeRight = pipe.x + (pipe.width * 0.8);
+                    
+                    if(slime.x - slimeBuffer < pipeRight &&
+                       slime.x + slime.width + slimeBuffer > pipeLeft &&
+                       slime.y < pipe.y + pipe.height &&
+                       slime.y + slime.height > pipe.y){
+                        // Reverse direction on pipe hit
+                        slime.vx *= -1;
+                        slime.x += slime.vx; // Nudge away from wall
+                    }
+                }
+
+                // Boundary collision
+                if(slime.y > GROUND_Y){ slime.y = GROUND_Y; slime.dy = 0; slime.onGround = true; }
+            }
+
+            // player-slime collision (with jump-on detection and damage)
+            for(let i = slimes.length - 1; i >= 0; i--){
+                const slime = slimes[i];
+                const overlapX = player.x + player.width > slime.x && player.x < slime.x + 48;
+                const overlapY = player.y + player.height > slime.y && player.y < slime.y + 48;
+                
+                if(overlapX && overlapY){
+                    // jump-on detection
+                    if(player.dy > 0 && player.y + player.height / 2 < slime.y + 24){
+                        slimes.splice(i, 1);
+                        player.dy = -10;
+                    } else if(checkDamageCollision(player, slime) && player.invincibleTimer <= 0){
+                        // touch-damage (using shrunk hitbox)
+                        player.currentHearts--;
+                        player.invincibleTimer = 90;
+                        if(player.currentHearts <= 0){
+                            player.x = respawnX;
+                            player.y = player.checkpointY; // Already includes -player.height offset
+                            player.currentHearts = player.maxHearts;
+                            player.invincibleTimer = 120;
+                            player.vx = 0;
+                            player.dy = 0;
+                            player.onGround = true;
+                        }
+                    }
+                }
+            }
+
+            for(const plant of plantList){
+                const relatedPipe = pipeList.find(p=>p.x + 18 === plant.x);
+                if(relatedPipe){
+                    plant.x = relatedPipe.x + 18; // centered in thinner pipe (100px)
+                    const baseY = relatedPipe.y + 20;
+                    const amplitude = 90;
+                    if(plant.waitTimer > 0){
+                        plant.waitTimer--;
+                        plant.y = baseY + amplitude; // stay at max height
+                        plant.isUp = true;
+                    } else {
+                        plant.y = baseY + Math.sin(Date.now() / 600) * amplitude;
+                        plant.isUp = plant.y > baseY + amplitude * 0.8; // consider up when near max
+                    }
+                    if(plant.y >= baseY + amplitude && plant.waitTimer <= 0){
+                        plant.waitTimer = 120; // 2-second stay at max height
+                    }
+                }
+
+                const plantRect = {x: plant.x, y: plant.y, width: 64, height: 96};
+                if(checkDamageCollision(player, plantRect)){
+                    if(player.invincibleTimer <= 0){
+                        player.currentHearts--;
+                        player.invincibleTimer = 90;
+                        if(player.currentHearts <= 0){
+                            player.x = respawnX;
+                            player.y = player.checkpointY; // Already includes -player.height offset
+                            player.currentHearts = player.maxHearts;
+                            player.invincibleTimer = 120;
+                            player.vx = 0;
+                            player.dy = 0;
+                            player.onGround = true;
+                        }
+                    }
+                }
+            }
+
+            for(const coin of coinList){
+                coin.yOffset = Math.sin(Date.now() / 200) * 5;
+                if(!coin.used && player.x + player.width > coin.x && player.x < coin.x + 48 && player.y + player.height > coin.y && player.y < coin.y + 48){
+                    coin.used = true;
+                    player.coins++;
+                }
+            }
+            for(const star of starList){
+                if(!star.used && player.x + player.width > star.x && player.x < star.x + 48 && player.y + player.height > star.y && player.y < star.y + 48){
+                    star.used = true;
+                    player.speed = SPRINT_SPEED; // temporarily boosted for clarity
+                    player.hasStar = true;
+                    player.speedTimer = 180;
+                }
+            }
+            for(const cp of checkpointList){
+                // Updated collision detection for 72x72 checkpoints
+                if(player.x + player.width > cp.x && player.x < cp.x + cp.width && player.y + player.height > cp.y && player.y < cp.y + cp.height){
+                    respawnX = cp.x;
+                    player.checkpointX = cp.x;
+                    player.checkpointY = cp.y - player.height; // Spawn ON TOP of checkpoint
+                }
+            }
+
+            if(player.vx !== 0){
+                player.animTimer++;
+                if(player.animTimer >= 8){
+                    player.animTimer = 0;
+                    player.animFrame = (player.animFrame + 1) % 4;
+                }
+            } else {
+                player.animTimer = 0;
+                player.animFrame = 0;
+            }
+
+            cameraX = Math.max(0, player.x - canvas.width * 0.5);
+            cameraY = player.y - canvas.height * 0.5; // Unlock vertical camera - no bounds
+
+            // Simple animation lock: prioritize onGround status
+            if(!player.onGround){
+                player.currentImage = 'JumpW.png';
+            } else if(Math.abs(player.vx) > 0.1){
+                player.currentImage = ['RunW1.png','RunW2.png','RunW3.png','RunW4.png'][player.animFrame];
+            } else {
+                player.currentImage = 'IdleW.png';
+            }
+        }
+
+        function draw(){
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Apocalypse effects: random vibration shake and red tint
+            let shakeX = 0, shakeY = 0;
+            if(isShaking){
+                const intensity = renderAlpha * 10; // Fade with renderAlpha
+                shakeX = (Math.random() - 0.5) * intensity;
+                shakeY = (Math.random() - 0.5) * intensity;
+                // Red tint fades with renderAlpha
+                ctx.fillStyle = `rgba(255, 0, 0, ${renderAlpha * 0.3})`;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+
+            ctx.save();
+            // Zoom in 5% during shake to prevent void
+            if(isShaking){
+                ctx.scale(1.05, 1.05);
+                ctx.translate(-shakeX * 0.05, -shakeY * 0.05); // Adjust for scale
+            } else {
+                ctx.translate(shakeX, shakeY);
+            }
+
+            const camX = player.x - canvas.width * 0.5;
+            if(images['noonbackground.png'].complete){
+                const bgX = (-(camX * 0.5) % canvas.width + canvas.width) % canvas.width;
+                ctx.drawImage(images['noonbackground.png'], bgX - canvas.width, 0, canvas.width, canvas.height);
+                ctx.drawImage(images['noonbackground.png'], bgX, 0, canvas.width, canvas.height);
+            }
+
+            ctx.save();
+            ctx.translate(-cameraX, -cameraY);
+
+            // Apocalypse RUN.png display with fade
+            if(showRunUI && images['RUN.png'] && images['RUN.png'].complete){
+                ctx.globalAlpha = renderAlpha;
+                const runWidth = canvas.width * 0.6;
+                const runHeight = runWidth * (62 / 200); // Assuming RUN.png is 200x62 or similar
+                const runX = (canvas.width - runWidth) / 2;
+                const runY = (canvas.height - runHeight) / 2;
+                ctx.drawImage(images['RUN.png'], runX, runY, runWidth, runHeight);
+                ctx.globalAlpha = 1;
+            }
+
+            // NUCLEAR RESET: Pipes and plants - draw as-is (no offset)
+            for(const plant of plantList){
+                if(images['PlantChomper.png'].complete){
+                    ctx.drawImage(images['PlantChomper.png'], plant.x, plant.y, 64, 96);
+                }
+            }
+            for(const pipe of pipeList){ if(images['Pipe.png'].complete) {
+                const visualOffset = 12; // Render offset for feet alignment
+                ctx.drawImage(images['Pipe.png'], pipe.x, pipe.y + visualOffset, 100, 450);
+            } }
+
+            // NUCLEAR RESET: Draw blocks with visualY (separate from collision)
+            for(const block of blocks){
+                if(images['GrassBlock.png'].complete){
+                    const visualOffset = 15; // Render offset for feet alignment
+                    ctx.drawImage(images['GrassBlock.png'], block.x, block.visualY + visualOffset, 64, 64);
+                }
+            }
+            
+            // Floating platforms
+            for(const fp of floatingPlatforms){
+                if(images['GrassBlock.png'].complete){
+                    const visualOffset = 15; // Render offset for feet alignment
+                    const count = fp.width / 64;
+                    for(let i = 0; i < count; i++){
+                        ctx.drawImage(images['GrassBlock.png'], fp.x + (i * 64), fp.y + visualOffset, 64, 64);
+                    }
+                }
+            }
+
+            // pickups
+            for(const coin of coinList){ if(!coin.used && images['Coin.png'].complete) ctx.drawImage(images['Coin.png'], coin.x, coin.y + coin.yOffset, 48, 48); }
+            for(const star of starList){ if(!star.used && images['Star.png'].complete) ctx.drawImage(images['Star.png'], star.x, star.y, 48, 48); }
+            for(const cp of checkpointList){ if(images['Checkpoint.png'].complete) ctx.drawImage(images['Checkpoint.png'], cp.x, cp.y - 10, cp.width, cp.height + 3); }
+
+            // NUCLEAR RESET: Slimes draw at slime.y + 20
+            for(const slime of slimes){
+                if(images['SlimeBlob.png'].complete){
+                    const slimeDrawWidth = 70;
+                    ctx.save();
+                    if(slime.vx < 0){ ctx.translate(slime.x + slimeDrawWidth * 0.5, slime.y + 20); ctx.scale(-1, 1); ctx.drawImage(images['SlimeBlob.png'], -slimeDrawWidth * 0.5, 0, slimeDrawWidth, 48); }
+                    else { ctx.drawImage(images['SlimeBlob.png'], slime.x - 3, slime.y + 20, slimeDrawWidth, 48); }
+                    ctx.restore();
+                }
+                if(slime.isAlarmed && slime.alarmTimer > 0 && images['ExclaMark.png'].complete){
+                    const markWidth = 19;
+                    const markHeight = 62;
+                    const exclaPosX = slime.x + (slime.width / 2) - (markWidth / 2);
+                    const exclaPosY = slime.y - markHeight - 15;
+                    ctx.drawImage(images['ExclaMark.png'], exclaPosX, exclaPosY, markWidth, markHeight);
+                }
+            }
+
+            // player sprite from update-based state lock
+            const playerSprite = player.currentImage || 'IdleW.png';
+
+            if(images[playerSprite] && images[playerSprite].complete){
+                ctx.save();
+                if(player.invincibleTimer > 0) ctx.globalAlpha = 0.5;
+                const spriteScale = 115; // Proportional to new 77x77 collision box
+                const offsets = 19; // Adjusted offset for larger sprite
+                const visualLift = 18; // Final visual lift for perfect foot alignment
+                const drawX = player.x - offsets;
+                const drawY = player.y - visualLift - offsets + 20;
+                
+                // Flip sprite based on FACING direction (not velocity)
+                if(player.facing === 'left'){
+                    ctx.translate(drawX + spriteScale, drawY);
+                    ctx.scale(-1, 1);
+                    ctx.drawImage(images[playerSprite], 0, 0, spriteScale, spriteScale);
+                } else {
+                    ctx.drawImage(images[playerSprite], drawX, drawY, spriteScale, spriteScale);
+                }
+                ctx.restore();
+            }
+
+            // NUCLEAR RESET: Draw ground layers with visualY offset
+            const floorEnd = Math.max(player.x + canvas.width, canvas.width);
+            for(let x = 0; x <= floorEnd; x += 64){
+                if(images['GrassBlock.png'].complete) ctx.drawImage(images['GrassBlock.png'], x, GROUND_Y + 20, 64, 64);
+                if(images['DirtBlock.png'].complete) ctx.drawImage(images['DirtBlock.png'], x, GROUND_Y + 84, 64, 64);
+                if(images['DirtBlock.png'].complete) ctx.drawImage(images['DirtBlock.png'], x, GROUND_Y + 148, 64, 64);
+                if(images['DirtBlock.png'].complete) ctx.drawImage(images['DirtBlock.png'], x, GROUND_Y + 212, 64, 64);
+            }
+
+            ctx.restore();
+
+            ctx.restore(); // End shake/zoom transform
+
+            // Pixel HUD with tight pixel shadows
+            ctx.font = "24px 'Courier New', monospace";
+            ctx.shadowColor = 'black';
+            ctx.shadowOffsetX = 1;
+            ctx.shadowOffsetY = 1;
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = '#fff';
+            
+            if(images['Coin.png'].complete) ctx.drawImage(images['Coin.png'], 10, 10, 32, 32);
+            ctx.fillText('x' + player.coins, 46, 36);
+
+            const scoreMeters = Math.floor(player.x / 200);
+            const distanceText = `${scoreMeters}m / 1000m`;
+            const tw = ctx.measureText(distanceText).width;
+            ctx.fillText(distanceText, canvas.width * 0.5 - tw * 0.5, 36);
+
+            ctx.font = "24px 'Courier New', monospace";
+            ctx.fillText('Shift to Sprint | R to Reset', 20, canvas.height - 30);
+
+            ctx.shadowColor = 'transparent';
+            for(let i = 0; i < player.maxHearts; i++){
+                if(images['HeartLife.png'].complete){
+                    const hx = canvas.width - 30 - i * 30;
+                    ctx.drawImage(images['HeartLife.png'], hx, 10, 24, 24);
+                    if(i >= player.currentHearts){ ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(hx, 10, 24, 24); }
+                }
+            }
+        }
+
+        function loop(){ if(loaded===assets.length){update();draw();} requestAnimationFrame(loop);} loop();
+    })();
+    </script>
+</body>
+</html>

@@ -4,10 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Retro Platformer</title>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
     <style>
         html, body { margin: 0; padding: 0; overflow: hidden; width: 100%; height: 100%; background: #000; }
         body { display: block; }
-        canvas { display: block; background: #87CEEB; margin: 0; padding: 0; }
+        canvas { display: block; background: #87CEEB; margin: 0; padding: 0; image-rendering: pixelated; }
     </style>
 </head>
 <body>
@@ -18,6 +19,7 @@
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
         const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = false;
 
         window.addEventListener('resize', () => {
             canvas.width = window.innerWidth;
@@ -26,15 +28,47 @@
 
         const NORMAL_SPEED = 7;
         const SPRINT_SPEED = 10.5;
+        const pixelsPerMeter = 200;
 
         const assets=[
             'IdleW.png','RunW1.png','RunW2.png','RunW3.png','RunW4.png','JumpW.png',
             'GrassBlock.png','DirtBlock.png','Pipe.png','PlantChomper.png',
-            'SlimeBlob.png','noonbackground.png','Coin.png','Star.png','Checkpoint.png','HeartLife.png','ExclaMark.png','RUN.png'
+            'SlimeBlob.png','noonbackground.png','Coin.png','Star.png','Checkpoint.png','HeartLife.png','ExclaMark.png','RUN.png',
+            'BlackGrass.png','BlackDirt.png','WhiteBackground.png',
+            'GreyGrass.png','GreyDirt.png','StaticBackground.gif','GreyPipe.png','GreyPlantMonster.png','GreySlimeBlob.png',
+            'Tentacle1.png','Tentacle2.png','Tentacle3.png','Tentacle4.png','Tentacle5.png'
         ];
         const images={};
         let loaded=0;
         assets.forEach(a=>{const i=new Image();i.src=a;i.onload=()=>loaded++;images[a]=i;});
+
+        // Global asset initialization (Anti-Freeze & Fail-Safe)
+        const greyGrass = new Image(); greyGrass.src = 'GreyGrass.png';
+        const greyDirt = new Image(); greyDirt.src = 'GreyDirt.png';
+        const grassBlack = new Image(); grassBlack.src = 'BlackGrass.png';
+        const dirtBlack = new Image(); dirtBlack.src = 'BlackDirt.png';
+        const staticVideo = document.createElement('video');
+        staticVideo.src = 'StaticNewBackground.mp4';
+        staticVideo.muted = true;
+        staticVideo.loop = true;
+        staticVideo.playsInline = true;
+        staticVideo.setAttribute('preload', 'auto');
+        staticVideo.play(); // Must be playing for frames to update on Canvas
+        const greyPipe = new Image(); greyPipe.src = 'GreyPipe.png';
+        const greyPlant = new Image(); greyPlant.src = 'GreyPlantMonster.png';
+        const greySlime = new Image(); greySlime.src = 'GreySlimeBlob.png';
+        const whiteBG = new Image(); whiteBG.src = 'WhiteBackground.png';
+        
+        // Phase 5 Assets (The Void)
+        const intenseBG = new Image(); intenseBG.src = 'IntenseStaticBackground.png';
+        const glitchOverlay = new Image(); glitchOverlay.src = 'BBGlitch.png';
+        const voidImg = new Image(); voidImg.src = 'BlackParticle.png';
+
+        const grassNoon = images['GrassBlock.png'];
+        const dirtNoon = images['DirtBlock.png'];
+        const bgNoon = images['noonbackground.png'];
+        const bgWhite = images['WhiteBackground.png'];
+        const flashImg = images['WhiteBackground.png'];
 
         const GROUND_Y = window.innerHeight - 64;
         const GRASS_TOP_OFFSET = -2;
@@ -42,25 +76,108 @@
         const JUMP_FORCE = -16;
         const GOAL_DISTANCE = 1000;
 
-        const player={x:50,y:GROUND_Y - 150,width:77,height:77,vx:0,dy:0,onGround:false,isJumping:false,jumpTimer:0,maxHearts:5,currentHearts:5,invincibleTimer:0,checkpointX:50,checkpointY:GROUND_Y,coins:0,active:true,animTimer:0,animFrame:0,speed:NORMAL_SPEED,sprintSpeed:SPRINT_SPEED,speedTimer:0,hasStar:false,facing:'right'};
+        const player={x:50,y:GROUND_Y - 150,width:77,height:77,vx:0,dy:0,onGround:false,isJumping:false,jumpTimer:0,maxHearts:5,hearts:5,invincibleTimer:0,checkpointX:50,checkpointY:GROUND_Y,coins:0,active:true,animTimer:0,animFrame:0,speed:NORMAL_SPEED,sprintSpeed:SPRINT_SPEED,speedTimer:0,hasStar:false,facing:'right',autoRun:false};
+        let hasRefreshed = false;
+
+        // The "Death Thing" Logic
+        let _hearts = 5; 
+        Object.defineProperty(player, 'hearts', {
+            get: function() { return _hearts; },
+            set: function(value) {
+                _hearts = value;
+                // The "Death Thing" Logic
+                if (_hearts <= 0 && player.distance >= 500 && player.distance <= 1000) {
+                    if (!hasRefreshed) {
+                        hasRefreshed = true;
+                        location.reload();
+                    }
+                }
+            }
+        });
+
+        Object.defineProperty(player, 'distance', {
+            get: function() { return Math.floor(player.x / pixelsPerMeter); }
+        });
         let respawnX=50;
         let cameraX=0, cameraY=0;
 
         // Apocalypse system variables
-        let hasTriggeredApocalypse = false;
+        let apocalypseStarted = false;
+        let zoomBackTriggered = false;
+        let cleanupDone = false;
+        let invisibleWallActive = false;
         let renderAlpha = 0;
-        let isShaking = false;
+        let shakeIntensity = 0;
         let showRunUI = false;
+        let apocalypseStartTime = 0;
+        
+        // Phase 3 variables
+        let isApocalypse = false;
+        let assetsSwapped = false;
+        let hasSecondShakeTriggered = false;
+        let secondShakeActive = false;
+        let secondShakeStartTime = 0;
+        
+        // Phase 4 variables (Final Blackout)
+        let isFinalBlackout = false;
+        
+        // Phase 5 variables (The Void)
+        let voidParticles = [];
+        let voidSpeed = 2.0;
+        let isPhase5 = false;
+        let isRealityCollapse = false;
+        let screenShake = 0;
+        
+        // Phase 5 Tentacle Wall variables
+        let tentacleXOffset = -0.05;
+        let tentacleFrameIdx = 0;
+        let tentacleTimer = 0;
+        const tentacleFrames = [
+            images['Tentacle1.png'],
+            images['Tentacle2.png'],
+            images['Tentacle3.png'],
+            images['Tentacle4.png'],
+            images['Tentacle5.png']
+        ];
+        
+        // Secondary flash variables
+        let secondaryFlashAlpha = 0;
+        
+        // Cinematic variables
+        let cameraScale = 1.1;
+        let flashAlpha = 0;
+        let teleport40Triggered = false;
+        let teleport93Triggered = false;
+        let teleport114Triggered = false;
+        let teleport157Triggered = false;
+        
+        // Phase 7 variables (Camera Zoom Choreography)
+        let phase7ZoomViewport = 0; // Track cumulative viewport shrinkage in pixels
+        let phase7State = 'setup'; // setup, snaps1, wide1, snaps2, wide2, snaps3, focus, reset, isolation, final
+        let phase7StartTime = 0; // For smooth transitions
+        let phase7BackgroundVisible = true;
+        let phase7BlackVignette = 0;
+        let phase7VignetteInnerRatio = 0.62;
+        let phase7PureBlack = false;
+        let phase7WhiteBGAlpha = 0;
+        let phase7EndingAlpha = 0;
+        let phase7HoldFlash = false;
+        let tentaclesVisible = true;
+        let glitchVisible = true;
+        let shieldVisible = true;
+        
+        // Audio setup
+        const apocalypseMusic = new Audio('Apocalypse.mp3');
 
         // NUCLEAR RESET: Clean block system with separate collision and visual coordinates
-        const blocks=[];
-        const floatingPlatforms=[];
-        const pipeList=[];
-        const plantList=[];
-        const coinList=[];
-        const starList=[];
-        const checkpointList=[];
-        const slimes=[{x:400,y:GROUND_Y-48,width:48,height:48,vx:0,dy:0,isAlarmed:false,isChasing:false,alarmTimer:0,onGround:true},{x:900,y:GROUND_Y-48,width:48,height:48,vx:0,dy:0,isAlarmed:false,isChasing:false,alarmTimer:0,onGround:true},{x:1400,y:GROUND_Y-48,width:48,height:48,vx:0,dy:0,isAlarmed:false,isChasing:false,alarmTimer:0,onGround:true}];
+        let blocks=[];
+        let floatingPlatforms=[];
+        let pipeList=[];
+        let plantList=[];
+        let coinList=[];
+        let starList=[];
+        let checkpointList=[];
+        let slimes=[{x:400,y:GROUND_Y-48,width:48,height:48,vx:0,dy:0,isAlarmed:false,isChasing:false,alarmTimer:0,onGround:true},{x:900,y:GROUND_Y-48,width:48,height:48,vx:0,dy:0,isAlarmed:false,isChasing:false,alarmTimer:0,onGround:true},{x:1400,y:GROUND_Y-48,width:48,height:48,vx:0,dy:0,isAlarmed:false,isChasing:false,alarmTimer:0,onGround:true}];
         let generatedUntil=0;
         let lastItemX = -200;
         
@@ -72,11 +189,26 @@
         const keysDown = {};
         window.addEventListener('keydown', e => { keysDown[e.code] = true; });
         window.addEventListener('keyup', e => { delete keysDown[e.code]; });
+        canvas.addEventListener('click', e => {
+            if (phase7EndingAlpha > 0) {
+                const rect = canvas.getBoundingClientRect();
+                const clickX = e.clientX - rect.left;
+                const clickY = e.clientY - rect.top;
+                const buttonWidth = 320;
+                const buttonHeight = 40;
+                const buttonX = (canvas.width - buttonWidth) / 2;
+                const buttonY = canvas.height / 2 + 30;
+                if (clickX >= buttonX && clickX <= buttonX + buttonWidth && clickY >= buttonY && clickY <= buttonY + buttonHeight) {
+                    window.location.reload();
+                }
+            }
+        });
         
-        // Dev cheat: Ctrl+Q teleports to 500m mark
+        // Dev cheat: Ctrl+Q teleports to 499m mark
         window.addEventListener('keydown', e => {
             if (e.ctrlKey && e.key === 'q') {
-                player.x = 100000; // 500m * 200 pixels per meter
+                e.preventDefault();
+                player.x = 499 * pixelsPerMeter;
                 player.y = GROUND_Y - player.height - 50;
                 respawnX = player.x;
                 player.checkpointY = player.y;
@@ -88,12 +220,234 @@
         });
 
         function fullReset(){
-            // Stop Apocalypse.mp3
-            // TODO: audio.pause(); audio.currentTime = 0;
-            hasTriggeredApocalypse = false;
+            // Stop Apocalypse.mp3 and reset it
+            apocalypseMusic.pause();
+            apocalypseMusic.currentTime = 0;
+            // Stop video playback
+            staticVideo.pause();
+            staticVideo.currentTime = 0;
+            apocalypseStarted = false;
+            zoomBackTriggered = false;
+            cleanupDone = false;
+            invisibleWallActive = false;
             renderAlpha = 0;
-            isShaking = false;
+            shakeIntensity = 0;
             showRunUI = false;
+            apocalypseStartTime = 0;
+            cameraScale = 1.1;
+            flashAlpha = 0;
+            isApocalypse = false;
+            assetsSwapped = false;
+            secondaryFlashAlpha = 0;
+            hasSecondShakeTriggered = false;
+            secondShakeActive = false;
+            secondShakeStartTime = 0;
+            isFinalBlackout = false;
+            isPhase5 = false;
+            isRealityCollapse = false;
+            voidParticles = [];
+            voidSpeed = 2.0;
+            phase7HoldFlash = false;
+            phase7WhiteBGAlpha = 0;
+            phase7PureBlack = false;
+            phase7VignetteInnerRatio = 0.62;
+            screenShake = 0;
+            tentacleXOffset = -0.05;
+            tentacleFrameIdx = 0;
+            tentacleTimer = 0;
+            player.autoRun = false;
+        }
+
+        // Phase 7: Zoom Choreography Function
+        function executePhase7() {
+            if (!apocalypseStarted) return;
+            const audioTime = apocalypseMusic.currentTime;
+            
+            // Easing functions
+            const cubicOut = t => 1 - Math.pow(1 - t, 3);
+            const cubicIn = t => t * t * t;
+            
+            // 61.13s – First snap zoom IN (150px shrink)
+            if (audioTime >= 61.13 && audioTime < 61.27) {
+                phase7ZoomViewport = 150;
+            }
+            // 61.27s – Second snap zoom IN (another 150px)
+            else if (audioTime >= 61.27 && audioTime < 62.70) {
+                phase7ZoomViewport = 300;
+            }
+            // 62.70s – 63.53s – Smooth zoom OUT
+            else if (audioTime >= 62.70 && audioTime < 63.53) {
+                const progress = (audioTime - 62.70) / 0.83;
+                phase7ZoomViewport = 300 - (300 * cubicOut(progress));
+            }
+            // 63.53s – Third snap zoom IN
+            else if (audioTime >= 63.53 && audioTime < 63.70) {
+                phase7ZoomViewport = 150;
+            }
+            // 63.70s – Fourth snap zoom IN (another 150px)
+            else if (audioTime >= 63.70 && audioTime < 64.93) {
+                phase7ZoomViewport = 300;
+            }
+            // 64.93s – 66.23s – Smooth zoom OUT
+            else if (audioTime >= 64.93 && audioTime < 66.23) {
+                const progress = (audioTime - 64.93) / 1.30;
+                phase7ZoomViewport = 300 - (300 * cubicOut(progress));
+            }
+            // 66.23s – Fifth snap zoom IN
+            else if (audioTime >= 66.23 && audioTime < 66.40) {
+                phase7ZoomViewport = 150;
+            }
+            // 66.40s – Sixth snap zoom IN (another 150px)
+            else if (audioTime >= 66.40 && audioTime < 67.00) {
+                phase7ZoomViewport = 300;
+            }
+            // 67.00s – 71.37s – The Final Focus (zoom IN very tight)
+            else if (audioTime >= 67.00 && audioTime < 71.37) {
+                const progress = (audioTime - 67.00) / 4.37;
+                phase7ZoomViewport = 300 + (600 * cubicIn(progress)); // Zoom from 300 to 900
+            }
+            // 71.37s – The Reset (white flash + slow zoom OUT)
+            else if (audioTime >= 71.37 && audioTime < 73.37) {
+                const progress = (audioTime - 71.37) / 2.0;
+                flashAlpha = Math.max(0, 1.0 - progress); // Fade flash to 0
+                phase7ZoomViewport = 900 * (1.0 - cubicOut(progress)); // Zoom back to normal
+            }
+            // 93.30s – 103.70s – Isolation Sequence
+            else if (audioTime >= 93.30 && audioTime < 103.70) {
+                const isolationZoom = 900; // high zoom crop to character
+                const progress = Math.min(Math.max((audioTime - 93.30) / 10.40, 0), 1);
+                phase7BackgroundVisible = false;
+                phase7ZoomViewport = isolationZoom * (1.0 - cubicIn(progress));
+            }
+            else if (audioTime >= 103.70 && audioTime < 182.40) {
+                phase7BackgroundVisible = true;
+                phase7ZoomViewport = 0;
+            }
+            // 182.40s – 188.20s – Feathered Pinch Vignette
+            else if (audioTime >= 182.40 && audioTime < 188.20) {
+                const progress = Math.min(Math.max((audioTime - 182.40) / 5.80, 0), 1);
+                phase7BlackVignette = cubicOut(progress);
+                phase7VignetteInnerRatio = 0.62 - (0.40 * progress);
+                phase7ZoomViewport = 700 * cubicOut(progress);
+                phase7PureBlack = false;
+                phase7WhiteBGAlpha = 0;
+                phase7HoldFlash = false;
+            }
+            // 188.20s – 189.00s – Hold tight zoom/vignette
+            else if (audioTime >= 188.20 && audioTime < 189.00) {
+                phase7BlackVignette = 1.0;
+                phase7VignetteInnerRatio = 0.22;
+                phase7ZoomViewport = 700;
+            }
+            // 189.00s – 189.80s – Black Screen Activation
+            else if (audioTime >= 189.00 && audioTime < 189.80) {
+                phase7HoldFlash = true;
+                flashAlpha = 1.0;
+                phase7BlackVignette = 0;
+                phase7WhiteBGAlpha = 0;
+                phase7PureBlack = true;
+                secondaryFlashAlpha = 0;
+                isRealityCollapse = false;
+                tentaclesVisible = false;
+                glitchVisible = false;
+                shieldVisible = false;
+                voidParticles = [];
+                screenShake = 0;
+                shakeIntensity = 0;
+            }
+            else if (audioTime >= 189.80 && audioTime < 191.67) {
+                phase7HoldFlash = false;
+                flashAlpha = 0;
+                phase7PureBlack = true;
+                phase7WhiteBGAlpha = 0;
+            }
+            // 191.67s – 208.10s – Fade in WhiteBackground over the Black Screen
+            else if (audioTime >= 191.67 && audioTime < 208.10) {
+                const progress = (audioTime - 191.67) / 16.43;
+                phase7WhiteBGAlpha = Math.min(Math.max(progress, 0), 1);
+                phase7PureBlack = true;
+            }
+            // 208.10s – 213.23s – Hold Solid White over the Black Screen
+            else if (audioTime >= 208.10 && audioTime < 213.23) {
+                phase7WhiteBGAlpha = 1.0;
+                phase7PureBlack = true;
+            }
+            // 213.23s – Continue Solid White Indefinitely
+            else if (audioTime >= 213.23) {
+                phase7WhiteBGAlpha = 1.0;
+                phase7PureBlack = true;
+            }
+            // 157.12s – 159.12s – WhiteBackground flash fade
+            if (audioTime >= 157.12 && audioTime < 159.12) {
+                const progress = (audioTime - 157.12) / 2.0;
+                phase7WhiteBGAlpha = Math.max(0, 1.0 - progress);
+            }
+
+            if (audioTime >= 218.00 && audioTime < 220.00) {
+                const progress = (audioTime - 218.00) / 2.0;
+                phase7EndingAlpha = progress;
+            }
+            else if (audioTime >= 218.00 && audioTime < 220.00) {
+                const progress = (audioTime - 218.00) / 2.0;
+                phase7EndingAlpha = progress;
+            }
+        }
+        
+        // Phase 5 Helper: Draw void particle with rotation
+        function drawVoidObj(p) {
+            if (!voidImg.complete) return;
+            ctx.save();
+            ctx.translate(p.x, p.y);
+            ctx.rotate(p.rot);
+            let size = 40 * p.s;
+            ctx.drawImage(voidImg, -size/2, -size/2, size, size);
+            ctx.restore();
+        }
+
+        // Phase 5 Helper: Draw tentacle wall in screen space
+        function drawTentacleWall() {
+            let currentFrame = tentacleFrames[tentacleFrameIdx];
+            if (!currentFrame || !currentFrame.complete) return;
+
+            let size = canvas.height + 100; 
+            let drawX = (tentacleXOffset * size) + (Math.random() * screenShake - screenShake / 2);
+            let drawY = -50 + (Math.random() * screenShake - screenShake / 2); // Center the +100 height buffer
+
+            // --- THE BLACK SHIELD ---
+            ctx.fillStyle = "black";
+            ctx.fillRect(-5000, -100, drawX + 5010, canvas.height + 200); 
+
+            // --- THE TENTACLE SQUARE ---
+            ctx.drawImage(currentFrame, drawX, drawY, size, size);
+
+            // --- LETHAL COLLISION ---
+            let playerScreenX = player.x - cameraX;
+            // Tightened lethal edge: 70% of the square's reach
+            let lethalEdge = drawX + (size * 0.70); 
+
+            if (playerScreenX < lethalEdge) {
+                if (player.distance >= 500 && player.distance <= 1000 && !hasRefreshed) {
+                    hasRefreshed = true;
+                    location.reload();
+                }
+                resetGame(); 
+            }
+        }
+
+        function resetGame(){
+            player.hearts = 0;
+        }
+
+        function clearApocalypseZone(){
+            const cleanupLimit = 450 * pixelsPerMeter;
+            blocks = blocks.filter(block => block.x > cleanupLimit);
+            floatingPlatforms = floatingPlatforms.filter(fp => fp.x > cleanupLimit);
+            pipeList = pipeList.filter(pipe => pipe.x > cleanupLimit);
+            plantList = plantList.filter(plant => plant.x > cleanupLimit);
+            coinList = coinList.filter(coin => coin.x > cleanupLimit);
+            starList = starList.filter(star => star.x > cleanupLimit);
+            checkpointList = checkpointList.filter(cp => cp.x > cleanupLimit);
+            slimes = slimes.filter(slime => slime.x > cleanupLimit);
         }
 
         function spawnPipe(x, gameDistance = 0){
@@ -109,10 +463,44 @@
         }
 
         function spawnChunk(baseX){
+            // Object Clearance: No spawns in 500-590m apocalypse zone
+            if (baseX >= 100000 && baseX < 118000) {
+                return; // Prevent all enemy/platform spawns in this zone
+            }
+
+            // Object Clearance: No spawns in 696-741m void zone
+            if (baseX >= 139200 && baseX < 148200) {
+                return; // Prevent all enemy/platform spawns in this zone
+            }
+
             // 3m safe zone: gameDistance = player.x / 200, so first 3m = x < 600
             const gameDistance = baseX / 200;
             if(gameDistance < 3){
                 return; // No spawns in first 3m (falling spawn safety zone)
+            }
+
+            // Phase 6: The Void 3 No-Spawn Rule (868m – 1000m)
+            if (gameDistance >= 868) {
+                return; // No Pipes, PlantMonsters, SlimeBlobs, or Platforms
+            }
+
+            // The Pipe Gauntlet (830m – 890m)
+            if (gameDistance >= 830 && gameDistance < 890) {
+                // Fill ground with Pipe.png obstacles, side-by-side, no overlap
+                for (let px = baseX; px < baseX + 400; px += 100) {
+                    spawnPipe(px, gameDistance);
+                }
+                // Add some floating platforms for vertical variety (not too many)
+                if (Math.random() < 0.6) {
+                    // Spawn 1-2 platforms for tighter aerial paths
+                    const numPlatforms = Math.random() < 0.5 ? 1 : 2;
+                    for (let i = 0; i < numPlatforms; i++) {
+                        const platformX = baseX + Math.random() * 200;
+                        const platformY = GROUND_Y - 180 - Math.random() * 220;
+                        floatingPlatforms.push({x: platformX, y: platformY, width: 128, height: 32});
+                    }
+                }
+                return;
             }
 
             let type = Math.random();
@@ -134,7 +522,7 @@
                 floatingPlatforms.push(islandPlatform);
                 const coinX = islandX + 64;
                 const coinY = 100 + Math.random() * 100;
-                if(Math.abs(coinX - lastItemX) >= 150){
+                if(Math.abs(coinX - lastItemX) >= 150 && coinX <= 500 * pixelsPerMeter){
                     coinList.push({x:coinX, y:coinY, used:false, yOffset:0});
                     lastItemX = coinX;
                 }
@@ -142,6 +530,14 @@
                 const randomHeight = GROUND_Y - 180 - Math.random() * 220; // Between 180px and 400px above ground
                 const grassPlatform = {x:baseX, y:randomHeight, width:128, height:32};
                 floatingPlatforms.push(grassPlatform);
+
+                // Difficulty Escalation (741m – 825m): Increase frequency
+                if (gameDistance >= 741 && gameDistance < 825 && Math.random() < 0.3) {
+                    const extraPlatformX = baseX + 160;
+                    const extraPlatformY = GROUND_Y - 180 - Math.random() * 220;
+                    floatingPlatforms.push({x:extraPlatformX, y:extraPlatformY, width:128, height:32});
+                }
+
                 const coinX = baseX + 40;
                 const coinY = 100 + Math.random() * 100;
                 if(Math.abs(coinX - lastItemX) >= 150){
@@ -152,11 +548,11 @@
                 spawnPipe(baseX, gameDistance);
                 const coinX = baseX + 40;
                 const coinY = 100 + Math.random() * 100;
-                if(Math.abs(coinX - lastItemX) >= 150){
+                if(Math.abs(coinX - lastItemX) >= 150 && coinX <= 500 * pixelsPerMeter){
                     coinList.push({x:coinX, y:coinY, used:false, yOffset:0});
                     lastItemX = coinX;
                 }
-                if(Math.random() < 0.2){
+                if(Math.random() < 0.2 && gameDistance < 500){
                     const starX = baseX + 60;
                     const starY = 100 + Math.random() * 100;
                     if(Math.abs(starX - lastItemX) >= 150){
@@ -170,11 +566,11 @@
                 floatingPlatforms.push(grassPlatform2);
                 const coinX = baseX + 30;
                 const coinY = 100 + Math.random() * 100;
-                if(Math.abs(coinX - lastItemX) >= 150){
+                if(Math.abs(coinX - lastItemX) >= 150 && coinX <= 500 * pixelsPerMeter){
                     coinList.push({x:coinX, y:coinY, used:false, yOffset:0});
                     lastItemX = coinX;
                 }
-                if(Math.random() < 0.15){
+                if(Math.random() < 0.15 && gameDistance < 500){
                     const starX = baseX + 40;
                     const starY = 100 + Math.random() * 100;
                     if(Math.abs(starX - lastItemX) >= 150){
@@ -185,6 +581,22 @@
                 const slimeX = baseX + 64;
                 const slimeY = grassPlatform2.y - 48;
                 slimes.push({x:slimeX, y:slimeY, width:48, height:48, vx:0, dy:0, isAlarmed:false, isChasing:false, alarmTimer:0, onGround:true});
+
+                // Difficulty Escalation (741m – 825m): Increase frequency
+                if (gameDistance >= 741 && gameDistance < 825) {
+                    // Extra slime
+                    if (Math.random() < 0.4) {
+                        const extraSlimeX = baseX + 128;
+                        const extraSlimeY = grassPlatform2.y - 48;
+                        slimes.push({x:extraSlimeX, y:extraSlimeY, width:48, height:48, vx:0, dy:0, isAlarmed:false, isChasing:false, alarmTimer:0, onGround:true});
+                    }
+                    // Extra platform
+                    if (Math.random() < 0.3) {
+                        const extraPlatformX = baseX + 160;
+                        const extraPlatformY = GROUND_Y - 180 - Math.random() * 220;
+                        floatingPlatforms.push({x:extraPlatformX, y:extraPlatformY, width:128, height:32});
+                    }
+                }
             }
 
             // Add low-level stepping stones only when shouldGenerateLowPlatforms is true (training zone)
@@ -244,9 +656,14 @@
             }
 
             const currentSpeed = (keysDown['ShiftLeft'] || keysDown['ShiftRight']) ? player.sprintSpeed : player.speed;
-            if(keysDown['ArrowLeft'] || keysDown['KeyA']) player.vx = -currentSpeed;
-            else if(keysDown['ArrowRight'] || keysDown['KeyD']) player.vx = currentSpeed;
-            else player.vx = 0; // Absolute reset when no keys pressed
+            if(!player.autoRun && (keysDown['ArrowLeft'] || keysDown['KeyA'])) player.vx = -currentSpeed;
+            else if(!player.autoRun && (keysDown['ArrowRight'] || keysDown['KeyD'])) player.vx = currentSpeed;
+            else if(!player.autoRun) player.vx = 0; // Absolute reset when no keys pressed
+
+            // Override for auto-run
+            if (player.autoRun) {
+                player.vx = player.sprintSpeed * 1.5;
+            }
 
             // Track player facing direction (happens before movement)
             if(player.vx !== 0){
@@ -264,9 +681,14 @@
                     player.y + player.height + player.dy >= pipe.y) {
                         player.y = pipe.y - player.height;
                         player.dy = 0;
+                        player.isJumping = false; 
                         player.onGround = true;
-                        player.isJumping = false;
-                        player.currentImage = (Math.abs(player.vx) > 0.1) ? 'RunW1.png' : 'IdleW.png';
+                        // Force the animation to check velocity:
+                        if (Math.abs(player.vx) > 0.1) {
+                            player.currentImage = 'RunW1.png';
+                        } else {
+                            player.currentImage = 'IdleW.png';
+                        }
                 } 
                 
                 // 2. SIDE COLLISION (Blocking Sprint/Walk) - Only if not on top
@@ -289,40 +711,252 @@
             player.x += player.vx;
             if(player.x < 0) player.x = 0;
 
-            // 500m Apocalypse Trigger - One-time only
-            const currentMeters = Math.floor(player.x / 200);
-            if(currentMeters >= 500 && !hasTriggeredApocalypse){
-                hasTriggeredApocalypse = true;
-                renderAlpha = 1.0;
-                isShaking = true;
-                showRunUI = true;
-                // TODO: Play Apocalypse.mp3 once
+            // 500m wall cleanup trigger
+            if(player.x >= 500 * pixelsPerMeter && !cleanupDone){
+                cleanupDone = true;
+                invisibleWallActive = true;
+                clearApocalypseZone();
+            }
+            if(invisibleWallActive && player.x < 470 * pixelsPerMeter){
+                player.x = 470 * pixelsPerMeter;
+                player.vx = 0;
             }
 
-            // Fade sequence over 3-5 seconds (180-300 frames at 60fps)
-            if(hasTriggeredApocalypse && renderAlpha > 0){
-                renderAlpha -= 0.005; // Adjust for desired fade time
-                if(renderAlpha <= 0){
+            // 501m Apocalypse Trigger - One-time only with lock
+            const currentMeters = Math.floor(player.x / pixelsPerMeter);
+            if(currentMeters >= 501 && !apocalypseStarted){
+                apocalypseStarted = true;
+                flashAlpha = 1.0; // Instant full white flash
+                renderAlpha = 1.0;
+                shakeIntensity = 1.0;
+                showRunUI = true;
+                apocalypseStartTime = performance.now();
+                cameraScale = 1.0; // Start at normal zoom
+                // Play music once
+                apocalypseMusic.play();
+            }
+
+            // Fade sequence over 3 seconds (flash fades first, then shake starts)
+            if(apocalypseStarted && apocalypseStartTime > 0){
+                const elapsedTime = performance.now() - apocalypseStartTime;
+                const fadeDuration = 3000; // 3 seconds in milliseconds
+                
+                if(elapsedTime >= fadeDuration){
+                    // Fade complete
                     renderAlpha = 0;
-                    isShaking = false;
+                    shakeIntensity = 0;
                     showRunUI = false;
+                    flashAlpha = 0;
+                } else {
+                    // Start shake after 1 second, while flash is decremented in draw()
+                    const flashFadeTime = 1000; // 1 second before shake begins
+                    if(elapsedTime >= flashFadeTime){
+                        const shakeProgress = (elapsedTime - flashFadeTime) / (fadeDuration - flashFadeTime);
+                        shakeIntensity = Math.max(0, 1.0 - shakeProgress);
+                    }
+                    // RUN.png fades with shake
+                    renderAlpha = shakeIntensity;
                 }
             }
 
-            // Hard Reset: Death or R key
-            const shouldReset = keysDown['KeyR'] || player.currentHearts <= 0;
-            if(shouldReset){
-                // Master reset: scrub environment
-                resetEnvironment();
+            // Cinematic zoom logic during apocalypse music
+            if(apocalypseStarted && apocalypseStartTime > 0){
+                const musicElapsed = (performance.now() - apocalypseStartTime) / 1000; // Convert to seconds
+                
+                if(musicElapsed <= 20.23){
+                    // Zoom in during first 20.23 seconds
+                    const zoomProgress = musicElapsed / 20.23;
+                    cameraScale = 1.0 + (zoomProgress * 3.0); // Zoom from 1.0x to 4.0x
+                } else if(!zoomBackTriggered && apocalypseMusic.currentTime >= 20.23){
+                    // Trigger flash and zoom back at exactly 20.23 seconds
+                    zoomBackTriggered = true;
+                    flashAlpha = 1.0; // White flash
+                    secondaryFlashAlpha = 1.0; // Image-based flash
+                } else if(zoomBackTriggered){
+                    // Fast zoom out using linear interpolation
+                    cameraScale = (cameraScale * 0.8) + (1.0 * 0.2);
+                }
+            }
 
-                // Safe spawn: if past 500m, spawn at 500m - 150px
-                const safeX = respawnX >= 100000 ? 99850 : (respawnX === 50 ? 0 : respawnX);
-                player.x = safeX;
+            // Phase 3: Asset Swap & Flash Trigger at 40.67 seconds
+            if(apocalypseStarted && apocalypseMusic.currentTime >= 40.67 && !assetsSwapped){
+                isApocalypse = true; // Immediately toggles all textures via ternary operators
+                flashAlpha = 1.0; // Trigger the white flash
+                secondaryFlashAlpha = 1.0; // Image-based flash
+                assetsSwapped = true;
+            }
+
+            // Auto teleport schedule for testing (one-time triggers)
+            if(apocalypseStarted && apocalypseMusic.currentTime >= 40.32 && !teleport40Triggered){
+                teleport40Triggered = true;
+                player.x = 586 * pixelsPerMeter;
+                player.y = GROUND_Y - player.height - 50;
+                respawnX = player.x;
+                player.checkpointX = player.x;
+                player.checkpointY = player.y;
+                player.vx = 0;
+                player.dy = 0;
+                player.onGround = true;
+            }
+            if(apocalypseStarted && apocalypseMusic.currentTime >= 93.15 && !teleport93Triggered){
+                teleport93Triggered = true;
+                player.x = 697 * pixelsPerMeter;
+                player.y = GROUND_Y - player.height - 50;
+                respawnX = player.x;
+                player.checkpointX = player.x;
+                player.checkpointY = player.y;
+                player.vx = 0;
+                player.dy = 0;
+                player.onGround = true;
+            }
+            if(apocalypseStarted && apocalypseMusic.currentTime >= 114.05 && !teleport114Triggered){
+                teleport114Triggered = true;
+                player.x = 738 * pixelsPerMeter;
+                player.y = GROUND_Y - player.height - 50;
+                respawnX = player.x;
+                player.checkpointX = player.x;
+                player.checkpointY = player.y;
+                player.vx = 0;
+                player.dy = 0;
+                player.onGround = true;
+            }
+            if(apocalypseStarted && apocalypseMusic.currentTime >= 157.12 && !teleport157Triggered){
+                teleport157Triggered = true;
+                player.x = 827 * pixelsPerMeter;
+                player.y = GROUND_Y - player.height - 50;
+                respawnX = player.x;
+                player.checkpointX = player.x;
+                player.checkpointY = player.y;
+                player.vx = 0;
+                player.dy = 0;
+                player.onGround = true;
+            }
+
+            // Phase 3: Reset screen shake at 40.67 seconds once
+            if(apocalypseStarted && apocalypseMusic.currentTime >= 40.67 && !hasSecondShakeTriggered){
+                shakeIntensity = 1.0;
+                hasSecondShakeTriggered = true;
+                secondShakeActive = true;
+                secondShakeStartTime = performance.now();
+            }
+
+            // Maintain second shake intensity and fade the same way as the first event
+            if(secondShakeActive){
+                const secondElapsed = performance.now() - secondShakeStartTime;
+                const secondFadeDuration = 3000; // 3 seconds total
+                const flashFadeTime = 1000; // shake starts after 1 second
+                if(secondElapsed >= secondFadeDuration){
+                    secondShakeActive = false;
+                    shakeIntensity = 0;
+                } else {
+                    if(secondElapsed >= flashFadeTime){
+                        const shakeProgress = (secondElapsed - flashFadeTime) / (secondFadeDuration - flashFadeTime);
+                        shakeIntensity = Math.max(0, 1.0 - shakeProgress);
+                    } else {
+                        shakeIntensity = 1.0;
+                    }
+                }
+            }
+
+            // Phase 4: Final Blackout at 93.1 seconds
+            if(apocalypseStarted && apocalypseMusic.currentTime >= 93.1 && !isFinalBlackout){
+                isFinalBlackout = true;
+                secondaryFlashAlpha = 1.0; // Trigger the final flash
+            }
+
+            // Phase 5 Trigger A: The Void Descent at 103.35 seconds
+            if(apocalypseStarted && apocalypseMusic.currentTime >= 103.35 && !isPhase5){
+                isPhase5 = true;
+                secondaryFlashAlpha = 1.0;
+                voidParticles = [];
+                for (let i = 0; i < 40; i++) {
+                    voidParticles.push({
+                        x: Math.random() * canvas.width,
+                        y: Math.random() * canvas.height,
+                        rot: Math.random() * 6.28,
+                        s: 1 + Math.random() * 0.3,
+                        layer: (i < 20) ? 'behind' : 'infront'
+                    });
+                }
+            }
+
+            // Phase 5 Trigger B: Reality Collapse at 114.05 seconds
+            if(apocalypseStarted && apocalypseMusic.currentTime >= 114.05 && !isRealityCollapse){
+                isRealityCollapse = true;
+                secondaryFlashAlpha = 1.0;
+                voidParticles = [];
+                screenShake = 4; // Permanent vibration
+            }
+
+            // Phase 5 Particle Animation Logic (Safe guards prevent crashes)
+            if (isPhase5 && !isRealityCollapse && voidParticles.length > 0) {
+                // Faster acceleration tuned for the 11-second window
+                if (apocalypseMusic.currentTime < 114.05) {
+                    voidSpeed += 0.08; 
+                }
+                
+                voidParticles.forEach(p => {
+                    p.y -= voidSpeed;
+                    p.rot += 0.03; // Slightly faster spin to match speed
+                    
+                    if (p.y < -64) {
+                        p.y = canvas.height + 64;
+                        p.x = Math.random() * canvas.width;
+                    }
+                });
+            }
+            
+            // Phase 5 Tentacle Wall Logic (8 FPS animation)
+            if (isRealityCollapse) {
+                tentacleTimer++;
+                if (tentacleTimer >= (60 / 8)) {
+                    tentacleFrameIdx = (tentacleFrameIdx + 1) % 5;
+                    tentacleTimer = 0;
+                }
+
+                if (player.vx > 0.1) {
+                    // Player Sprinting Right: Retreats VERY slowly
+                    tentacleXOffset -= 0.005; 
+                    if (tentacleXOffset < -0.05) tentacleXOffset = -0.05; 
+                } else {
+                    // Player Stopped/Left: Advances aggressively
+                    tentacleXOffset += 0.012; 
+                }
+                if (tentacleXOffset > 1.0) tentacleXOffset = 1.0;
+            }
+
+            // Phase 6: Forced Sprint Trigger at 881m
+            if (Math.floor(player.x / pixelsPerMeter) >= 881 && !player.autoRun) {
+                player.autoRun = true;
+            }
+
+            // Phase 7: Movement Logic
+            // At 881m: constant auto-sprint speed boost
+            if (Math.floor(player.x / pixelsPerMeter) >= 881 && Math.floor(player.x / pixelsPerMeter) < 1000) {
+                if (player.autoRun) {
+                    player.vx = player.sprintSpeed * 1.5; // 1.5x velocity boost
+                }
+            }
+
+            // Phase 7: Terminal Stop at 1000m
+            if (Math.floor(player.x / pixelsPerMeter) >= 1000) {
+                player.vx = 0;
+                player.autoRun = false;
+            }
+
+            // Hard Reset: Death only
+            const shouldReset = player.hearts <= 0;
+            if(shouldReset){
+                // Reset all apocalypse effects
+                fullReset();
+
+                // Safe spawn: if past 500m, spawn at respawn checkpoint
+                player.x = respawnX;
                 player.y = player.checkpointY;
                 player.vx = 0;
                 player.dy = 0;
                 player.onGround = true;
-                player.currentHearts = 5; // Reset hearts
+                player.hearts = player.maxHearts; // Reset hearts to max
             }
 
             // JUMP INPUT: Set upward velocity with maximum nudge for bigger player
@@ -392,9 +1026,14 @@
                                 player.surfaceY = block.collisionY;
                                 player.y = block.collisionY - player.height + 2; // Standard landing offset
                                 player.dy = 0;
+                                player.isJumping = false; 
                                 player.onGround = true;
-                                player.isJumping = false;
-                                player.currentImage = (Math.abs(player.vx) > 0.1) ? 'RunW1.png' : 'IdleW.png';
+                                // Force the animation to check velocity:
+                                if (Math.abs(player.vx) > 0.1) {
+                                    player.currentImage = 'RunW1.png';
+                                } else {
+                                    player.currentImage = 'IdleW.png';
+                                }
                                 groundHit = true;
                                 break;
                             }
@@ -412,9 +1051,14 @@
                                 player.surfaceY = fp.y;
                                 player.y = fp.y - player.height + 2; // Standard landing offset
                                 player.dy = 0;
+                                player.isJumping = false; 
                                 player.onGround = true;
-                                player.isJumping = false;
-                                player.currentImage = (Math.abs(player.vx) > 0.1) ? 'RunW1.png' : 'IdleW.png';
+                                // Force the animation to check velocity:
+                                if (Math.abs(player.vx) > 0.1) {
+                                    player.currentImage = 'RunW1.png';
+                                } else {
+                                    player.currentImage = 'IdleW.png';
+                                }
                                 groundHit = true;
                                 break;
                             }
@@ -608,12 +1252,12 @@
                         player.dy = -10;
                     } else if(checkDamageCollision(player, slime) && player.invincibleTimer <= 0){
                         // touch-damage (using shrunk hitbox)
-                        player.currentHearts--;
+                        player.hearts--;
                         player.invincibleTimer = 90;
-                        if(player.currentHearts <= 0){
+                        if(player.hearts <= 0){
                             player.x = respawnX;
                             player.y = player.checkpointY; // Already includes -player.height offset
-                            player.currentHearts = player.maxHearts;
+                            player.hearts = player.maxHearts;
                             player.invincibleTimer = 120;
                             player.vx = 0;
                             player.dy = 0;
@@ -645,12 +1289,12 @@
                 const plantRect = {x: plant.x, y: plant.y, width: 64, height: 96};
                 if(checkDamageCollision(player, plantRect)){
                     if(player.invincibleTimer <= 0){
-                        player.currentHearts--;
+                        player.hearts--;
                         player.invincibleTimer = 90;
-                        if(player.currentHearts <= 0){
+                        if(player.hearts <= 0){
                             player.x = respawnX;
                             player.y = player.checkpointY; // Already includes -player.height offset
-                            player.currentHearts = player.maxHearts;
+                            player.hearts = player.maxHearts;
                             player.invincibleTimer = 120;
                             player.vx = 0;
                             player.dy = 0;
@@ -696,88 +1340,173 @@
             }
 
             cameraX = Math.max(0, player.x - canvas.width * 0.5);
-            cameraY = player.y - canvas.height * 0.5; // Unlock vertical camera - no bounds
+            cameraY = player.y - canvas.height * 0.5;
 
-            // Simple animation lock: prioritize onGround status
-            if(!player.onGround){
-                player.currentImage = 'JumpW.png';
-            } else if(Math.abs(player.vx) > 0.1){
+            if(player.vx !== 0){
                 player.currentImage = ['RunW1.png','RunW2.png','RunW3.png','RunW4.png'][player.animFrame];
             } else {
                 player.currentImage = 'IdleW.png';
             }
+            
+            // Execute Phase 7 choreography
+            executePhase7();
         }
 
         function draw(){
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            // Apocalypse effects: random vibration shake and red tint
+            // Apocalypse effects: jagged vibration shake and red tint
             let shakeX = 0, shakeY = 0;
-            if(isShaking){
-                const intensity = renderAlpha * 10; // Fade with renderAlpha
+            let currentShake = Math.max(shakeIntensity, screenShake);
+            if(currentShake > 0){
+                const intensity = currentShake * 10; // Jagged random vibration
                 shakeX = (Math.random() - 0.5) * intensity;
                 shakeY = (Math.random() - 0.5) * intensity;
-                // Red tint fades with renderAlpha
-                ctx.fillStyle = `rgba(255, 0, 0, ${renderAlpha * 0.3})`;
+                // Red tint fades with shakeIntensity
+                ctx.fillStyle = `rgba(255, 0, 0, ${currentShake * 0.3})`;
                 ctx.fillRect(0, 0, canvas.width, canvas.height);
             }
 
             ctx.save();
-            // Zoom in 5% during shake to prevent void
-            if(isShaking){
-                ctx.scale(1.05, 1.05);
-                ctx.translate(-shakeX * 0.05, -shakeY * 0.05); // Adjust for scale
-            } else {
-                ctx.translate(shakeX, shakeY);
+            // Apply cinematic zoom scaling + Phase 7 viewport shrinkage
+            let effectiveScale = cameraScale;
+            if (phase7ZoomViewport > 0) {
+                // Convert viewport shrinkage to scale increase (zoom in)
+                effectiveScale += (phase7ZoomViewport / 500); // Scale factor based on pixel shrinkage
             }
+            ctx.scale(effectiveScale, effectiveScale);
+            const scaleOffsetX = (canvas.width * (effectiveScale - 1)) / (2 * effectiveScale);
+            const scaleOffsetY = (canvas.height * (effectiveScale - 1)) / (2 * effectiveScale);
+            ctx.translate(-scaleOffsetX, -scaleOffsetY);
+            
+            // Apply shake translation even if not shaking (smooth fallback)
+            ctx.translate(shakeX, shakeY);
 
             const camX = player.x - canvas.width * 0.5;
-            if(images['noonbackground.png'].complete){
+            
+            // --- LAYER 1: BASE BACKGROUND ---
+            if (isRealityCollapse) {
+                // PHASE 5 REALITY COLLAPSE: Camera-locked background shield
+                if (intenseBG.complete) {
+                    ctx.save();
+                    ctx.drawImage(intenseBG, -75, -75, canvas.width + 150, canvas.height + 150);
+                    ctx.restore();
+                }
+            } else if (isFinalBlackout) {
+                // PHASE 4: Force White Background (Overrides everything)
+                if (whiteBG.complete) {
+                    ctx.drawImage(whiteBG, 0, 0, canvas.width, canvas.height);
+                } else {
+                    // Hard fallback if image fails to load
+                    ctx.fillStyle = "white";
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                }
+            } else if (isApocalypse) {
+                // PHASE 2: Anti-Flicker & Lag-Proof Video
+                ctx.fillStyle = "black";
+                ctx.fillRect(0, 0, canvas.width, canvas.height); // Safety Underlay
+
+                if (staticVideo.readyState >= 2) {
+                    ctx.drawImage(staticVideo, 0, 0, canvas.width, canvas.height);
+                    // Auto-resume video if it pauses due to lag
+                    if (staticVideo.paused) {
+                        staticVideo.play().catch(() => {});
+                    }
+                }
+            } else if (apocalypseStarted) {
+                // PHASE 1: White Background (between trigger and asset swap)
+                let currentBG = bgWhite;
                 const bgX = (-(camX * 0.5) % canvas.width + canvas.width) % canvas.width;
-                ctx.drawImage(images['noonbackground.png'], bgX - canvas.width, 0, canvas.width, canvas.height);
-                ctx.drawImage(images['noonbackground.png'], bgX, 0, canvas.width, canvas.height);
+                if (currentBG.complete || currentBG.readyState === 2) {
+                    ctx.drawImage(currentBG, bgX - canvas.width, 0, canvas.width, canvas.height);
+                    ctx.drawImage(currentBG, bgX, 0, canvas.width, canvas.height);
+                }
+            } else {
+                // Normal: Noon background
+                let currentBG = bgNoon;
+                const bgX = (-(camX * 0.5) % canvas.width + canvas.width) % canvas.width;
+                if (currentBG.complete || currentBG.readyState === 2) {
+                    ctx.drawImage(currentBG, bgX - canvas.width, 0, canvas.width, canvas.height);
+                    ctx.drawImage(currentBG, bgX, 0, canvas.width, canvas.height);
+                }
+            }
+            
+            // --- LAYER 2: VOID PARTICLES (BEHIND) ---
+            if (isPhase5 && !isRealityCollapse && voidParticles.length > 0) {
+                voidParticles.forEach(p => {
+                    if (p && p.layer === 'behind' && voidImg.complete) {
+                        ctx.save();
+                        ctx.translate(p.x, p.y);
+                        ctx.rotate(p.rot);
+                        let size = 40 * p.s;
+                        ctx.drawImage(voidImg, -size/2, -size/2, size, size);
+                        ctx.restore();
+                    }
+                });
             }
 
             ctx.save();
             ctx.translate(-cameraX, -cameraY);
-
-            // Apocalypse RUN.png display with fade
-            if(showRunUI && images['RUN.png'] && images['RUN.png'].complete){
-                ctx.globalAlpha = renderAlpha;
-                const runWidth = canvas.width * 0.6;
-                const runHeight = runWidth * (62 / 200); // Assuming RUN.png is 200x62 or similar
-                const runX = (canvas.width - runWidth) / 2;
-                const runY = (canvas.height - runHeight) / 2;
-                ctx.drawImage(images['RUN.png'], runX, runY, runWidth, runHeight);
-                ctx.globalAlpha = 1;
+            let drawGrass = grassNoon; // Default fallback
+            let drawDirt = dirtNoon;   // Default fallback
+            if (isFinalBlackout) {
+                drawGrass = grassBlack;
+                drawDirt = dirtBlack;
+            } else if (isRealityCollapse || isApocalypse) {
+                drawGrass = greyGrass;
+                drawDirt = greyDirt;
+            } else if (apocalypseStarted) {
+                drawGrass = grassBlack;
+                drawDirt = dirtBlack;
             }
+            const grassImage = drawGrass;
+            const dirtImage = drawDirt;
 
+            // Draw game world (background, platforms, player, etc.)
             // NUCLEAR RESET: Pipes and plants - draw as-is (no offset)
             for(const plant of plantList){
-                if(images['PlantChomper.png'].complete){
-                    ctx.drawImage(images['PlantChomper.png'], plant.x, plant.y, 64, 96);
+                const plantImage = isApocalypse ? greyPlant : images['PlantChomper.png'];
+                if(plantImage.complete){
+                    ctx.drawImage(plantImage, plant.x, plant.y, 64, 96);
                 }
             }
-            for(const pipe of pipeList){ if(images['Pipe.png'].complete) {
-                const visualOffset = 12; // Render offset for feet alignment
-                ctx.drawImage(images['Pipe.png'], pipe.x, pipe.y + visualOffset, 100, 450);
-            } }
+            for(const pipe of pipeList){
+                const pipeImage = isApocalypse ? greyPipe : images['Pipe.png'];
+                if(pipeImage.complete) {
+                    const visualOffset = 12; // Render offset for feet alignment
+                    ctx.drawImage(pipeImage, pipe.x, pipe.y + visualOffset, 100, 450);
+                }
+            }
 
-            // NUCLEAR RESET: Draw blocks with visualY (separate from collision)
-            for(const block of blocks){
-                if(images['GrassBlock.png'].complete){
-                    const visualOffset = 15; // Render offset for feet alignment
-                    ctx.drawImage(images['GrassBlock.png'], block.x, block.visualY + visualOffset, 64, 64);
+            // NUCLEAR RESET: Draw blocks with visualY (separate from collision) - skipped during isolation
+            if (phase7BackgroundVisible) {
+                for(const block of blocks){
+                    if(grassImage.complete){
+                        const visualOffset = 15; // Render offset for feet alignment
+                        ctx.drawImage(grassImage, block.x, block.visualY + visualOffset, 64, 64);
+                    }
                 }
             }
             
-            // Floating platforms
-            for(const fp of floatingPlatforms){
-                if(images['GrassBlock.png'].complete){
-                    const visualOffset = 15; // Render offset for feet alignment
-                    const count = fp.width / 64;
-                    for(let i = 0; i < count; i++){
-                        ctx.drawImage(images['GrassBlock.png'], fp.x + (i * 64), fp.y + visualOffset, 64, 64);
+            // Ground floor rendering (skipped during isolation view)
+            if (phase7BackgroundVisible) {
+                for(let x = -canvas.width; x < canvas.width * 2; x += 64){
+                    if(grassImage.complete) ctx.drawImage(grassImage, x, GROUND_Y + 20, 64, 64);
+                    if(dirtImage.complete) ctx.drawImage(dirtImage, x, GROUND_Y + 84, 64, 64);
+                    if(dirtImage.complete) ctx.drawImage(dirtImage, x, GROUND_Y + 148, 64, 64);
+                    if(dirtImage.complete) ctx.drawImage(dirtImage, x, GROUND_Y + 212, 64, 64);
+                }
+            }
+            
+            // Floating platforms (skipped during isolation view)
+            if (phase7BackgroundVisible) {
+                for(const fp of floatingPlatforms){
+                    if(grassImage.complete){
+                        const visualOffset = 15; // Render offset for feet alignment
+                        const count = fp.width / 64;
+                        for(let i = 0; i < count; i++){
+                            ctx.drawImage(grassImage, fp.x + (i * 64), fp.y + visualOffset, 64, 64);
+                        }
                     }
                 }
             }
@@ -789,11 +1518,12 @@
 
             // NUCLEAR RESET: Slimes draw at slime.y + 20
             for(const slime of slimes){
-                if(images['SlimeBlob.png'].complete){
+                const slimeImage = isApocalypse ? greySlime : images['SlimeBlob.png'];
+                if(slimeImage.complete){
                     const slimeDrawWidth = 70;
                     ctx.save();
-                    if(slime.vx < 0){ ctx.translate(slime.x + slimeDrawWidth * 0.5, slime.y + 20); ctx.scale(-1, 1); ctx.drawImage(images['SlimeBlob.png'], -slimeDrawWidth * 0.5, 0, slimeDrawWidth, 48); }
-                    else { ctx.drawImage(images['SlimeBlob.png'], slime.x - 3, slime.y + 20, slimeDrawWidth, 48); }
+                    if(slime.vx < 0){ ctx.translate(slime.x + slimeDrawWidth * 0.5, slime.y + 20); ctx.scale(-1, 1); ctx.drawImage(slimeImage, -slimeDrawWidth * 0.5, 0, slimeDrawWidth, 48); }
+                    else { ctx.drawImage(slimeImage, slime.x - 3, slime.y + 20, slimeDrawWidth, 48); }
                     ctx.restore();
                 }
                 if(slime.isAlarmed && slime.alarmTimer > 0 && images['ExclaMark.png'].complete){
@@ -806,13 +1536,18 @@
             }
 
             // player sprite from update-based state lock
-            const playerSprite = player.currentImage || 'IdleW.png';
+            let playerSprite;
+            if (!player.onGround) {
+                playerSprite = 'JumpW.png';
+            } else {
+                playerSprite = player.currentImage || 'IdleW.png';
+            }
 
             if(images[playerSprite] && images[playerSprite].complete){
                 ctx.save();
                 if(player.invincibleTimer > 0) ctx.globalAlpha = 0.5;
-                const spriteScale = 115; // Proportional to new 77x77 collision box
-                const offsets = 19; // Adjusted offset for larger sprite
+                const spriteScale = playerSprite === 'JumpW.png' ? 118 : 115; // Boost JumpW.png by 3px
+                const offsets = (spriteScale - player.width) / 2; // Center on hitbox X-axis
                 const visualLift = 18; // Final visual lift for perfect foot alignment
                 const drawX = player.x - offsets;
                 const drawY = player.y - visualLift - offsets + 20;
@@ -831,41 +1566,146 @@
             // NUCLEAR RESET: Draw ground layers with visualY offset
             const floorEnd = Math.max(player.x + canvas.width, canvas.width);
             for(let x = 0; x <= floorEnd; x += 64){
-                if(images['GrassBlock.png'].complete) ctx.drawImage(images['GrassBlock.png'], x, GROUND_Y + 20, 64, 64);
-                if(images['DirtBlock.png'].complete) ctx.drawImage(images['DirtBlock.png'], x, GROUND_Y + 84, 64, 64);
-                if(images['DirtBlock.png'].complete) ctx.drawImage(images['DirtBlock.png'], x, GROUND_Y + 148, 64, 64);
-                if(images['DirtBlock.png'].complete) ctx.drawImage(images['DirtBlock.png'], x, GROUND_Y + 212, 64, 64);
+                if(grassImage.complete) ctx.drawImage(grassImage, x, GROUND_Y + 20, 64, 64);
+                if(dirtImage.complete) ctx.drawImage(dirtImage, x, GROUND_Y + 84, 64, 64);
+                if(dirtImage.complete) ctx.drawImage(dirtImage, x, GROUND_Y + 148, 64, 64);
+                if(dirtImage.complete) ctx.drawImage(dirtImage, x, GROUND_Y + 212, 64, 64);
             }
 
             ctx.restore();
 
+            // Apocalypse RUN.png display with fade (large and centered, on top of flash)
+            if(showRunUI && images['RUN.png'] && images['RUN.png'].complete){
+                ctx.globalAlpha = renderAlpha;
+                const runWidth = canvas.width * 0.75; // 75% of screen width, large
+                const runHeight = runWidth * (62 / 200) * 1.5; // Increased height to 1.5x scale
+                const runX = (canvas.width - runWidth) / 2;
+                const runY = (canvas.height - runHeight) / 2;
+                ctx.drawImage(images['RUN.png'], runX, runY, runWidth, runHeight);
+                ctx.globalAlpha = 1;
+            }
+
             ctx.restore(); // End shake/zoom transform
 
-            // Pixel HUD with tight pixel shadows
-            ctx.font = "24px 'Courier New', monospace";
-            ctx.shadowColor = 'black';
-            ctx.shadowOffsetX = 1;
-            ctx.shadowOffsetY = 1;
+            if (isRealityCollapse && tentaclesVisible && shieldVisible) {
+                drawTentacleWall();
+            }
+
+            // --- LAYER 4: VOID PARTICLES (FRONT) ---
+            if (isPhase5 && !isRealityCollapse && voidParticles.length > 0) {
+                voidParticles.forEach(p => {
+                    if (p && p.layer === 'infront' && voidImg.complete) {
+                        ctx.save();
+                        ctx.translate(p.x, p.y);
+                        ctx.rotate(p.rot);
+                        let size = 40 * p.s;
+                        ctx.drawImage(voidImg, -size/2, -size/2, size, size);
+                        ctx.restore();
+                    }
+                });
+            }
+
+            // --- LAYER 5: GLITCH & FLASH ---
+            if (isRealityCollapse && glitchVisible && glitchOverlay.complete) {
+                let jX = Math.random() * 20 - 10;
+                let jY = Math.random() * 20 - 10;
+                ctx.drawImage(glitchOverlay, -40 + jX, -40 + jY, canvas.width + 80, canvas.height + 80);
+            }
+
+            // --- PHASE 7: PURE BLACK OVERRIDE (Above Glitch & World Assets) ---
+            if (phase7PureBlack) {
+                ctx.fillStyle = "black";
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+
+            if (phase7BlackVignette > 0) {
+                const centerX = (player.x - cameraX) + player.width * 0.5;
+                const centerY = (player.y - cameraY) + player.height * 0.5;
+                const radius = Math.hypot(canvas.width, canvas.height) * 0.55;
+                const innerRadius = Math.max(0.15, phase7VignetteInnerRatio) * radius;
+                const gradient = ctx.createRadialGradient(centerX, centerY, innerRadius, centerX, centerY, radius);
+                gradient.addColorStop(0, `rgba(0, 0, 0, 0)`);
+                gradient.addColorStop(0.92, `rgba(0, 0, 0, ${phase7BlackVignette * 0.18})`);
+                gradient.addColorStop(1, `rgba(0, 0, 0, ${phase7BlackVignette})`);
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+
+            if (phase7WhiteBGAlpha > 0) {
+                ctx.save();
+                ctx.globalAlpha = phase7WhiteBGAlpha;
+                if (whiteBG.complete) {
+                    ctx.drawImage(whiteBG, 0, 0, canvas.width, canvas.height);
+                } else {
+                    ctx.fillStyle = 'white';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                }
+                ctx.restore();
+            }
+
+            // --- PHASE 7: HUD & Ending UI ---
+            ctx.save();
+            ctx.imageSmoothingEnabled = false;
+            ctx.fillStyle = '#ffffff';
+            ctx.font = "16px 'Press Start 2P', monospace";
+            ctx.shadowColor = '#000000';
+            ctx.shadowOffsetX = 3;
+            ctx.shadowOffsetY = 3;
             ctx.shadowBlur = 0;
-            ctx.fillStyle = '#fff';
-            
+            ctx.textAlign = 'left';
+
             if(images['Coin.png'].complete) ctx.drawImage(images['Coin.png'], 10, 10, 32, 32);
             ctx.fillText('x' + player.coins, 46, 36);
 
+            ctx.textAlign = 'center';
             const scoreMeters = Math.floor(player.x / 200);
             const distanceText = `${scoreMeters}m / 1000m`;
-            const tw = ctx.measureText(distanceText).width;
-            ctx.fillText(distanceText, canvas.width * 0.5 - tw * 0.5, 36);
+            ctx.fillText(distanceText, canvas.width / 2, 36);
 
-            ctx.font = "24px 'Courier New', monospace";
-            ctx.fillText('Shift to Sprint | R to Reset', 20, canvas.height - 30);
+            // removed R reset UI per updated reset logic
 
-            ctx.shadowColor = 'transparent';
+            if (phase7EndingAlpha > 0) {
+                ctx.fillStyle = `rgba(255, 255, 255, ${phase7EndingAlpha})`;
+                ctx.font = "16px 'Press Start 2P', monospace";
+                ctx.textAlign = 'center';
+                ctx.fillText("You Escaped", canvas.width / 2, canvas.height / 2 - 50);
+                ctx.fillText("Play Again?", canvas.width / 2, canvas.height / 2 + 50);
+            }
+
+            ctx.restore();
+
+            // 2-Second Full-Screen Flash (Top Layer - Very Last Draw Call)
+            if(flashAlpha > 0){
+                ctx.fillStyle = `rgba(255, 255, 255, ${flashAlpha})`;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                if (!phase7HoldFlash) {
+                    flashAlpha = Math.max(0, flashAlpha - 0.008);
+                }
+            }
+
+            // Hearts/Lives (Absolute Top UI Layer)
+            ctx.save();
+            ctx.imageSmoothingEnabled = false;
+            ctx.shadowColor = '#000000';
+            ctx.shadowOffsetX = 3;
+            ctx.shadowOffsetY = 3;
+            ctx.shadowBlur = 0;
             for(let i = 0; i < player.maxHearts; i++){
                 if(images['HeartLife.png'].complete){
                     const hx = canvas.width - 30 - i * 30;
                     ctx.drawImage(images['HeartLife.png'], hx, 10, 24, 24);
-                    if(i >= player.currentHearts){ ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(hx, 10, 24, 24); }
+                    if(i >= player.hearts){ ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(hx, 10, 24, 24); }
+                }
+            }
+            ctx.restore();
+
+            // Image-Based Secondary Flash (Absolute Final Draw Call)
+            if (apocalypseMusic.currentTime >= 20.23) {
+                if (secondaryFlashAlpha > 0) {
+                    ctx.globalAlpha = secondaryFlashAlpha;
+                    ctx.drawImage(flashImg, 0, 0, canvas.width, canvas.height);
+                    ctx.globalAlpha = 1.0;
+                    secondaryFlashAlpha -= 0.008; // 2-second fade
                 }
             }
         }
